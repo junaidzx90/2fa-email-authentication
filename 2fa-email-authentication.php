@@ -41,7 +41,6 @@ function checking_user_credentials_validity( $user, $password ) {
 	if(wp_check_password($password, $user->user_pass, $user->ID)){ 
 		// Calling a function to send message
 		do_action( 'send_verification', $user, $password );
-
 		$message = esc_html__( 'A verification link sent to your email address.', '2fa-email-authentication');
 		return new WP_Error( 'is_user_valid', $message ); // Prevent the access with the error exception for valid user
 	}else{
@@ -66,16 +65,29 @@ add_action("send_verification", "send_verification_link", 10, 2);
 function send_verification_link($user, $password){
 	$stringLength = 6;
 	$token = substr(str_shuffle(str_repeat($x='0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', ceil($stringLength/strlen($x)) )), 1, $stringLength);
-	$encoded_token = base64_encode($token); // Encode the string for send the email
+	$verificationCode = $token;
+
+	$userLocalIp = getenv("REMOTE_ADDR");
 
 	$authentication_array = array(
-		'user_login'    => $user->user_login,
-		'user_password' => $password
+		'access' => [
+			'user_login'    => $user->user_login,
+			'user_password' => $password,
+		],
+		'token' => [
+			'user_email' => $user->user_email,
+			'user_ip' => $userLocalIp,
+			'verification_code' => $verificationCode
+		]
 	);
-	set_transient( $token, $authentication_array,  MINUTE_IN_SECONDS * 15 ); // Set transient with the unique token (Each user will have different key)
+
+	// Make 128bit format string with the md5
+	$uniqueString = md5(json_encode($authentication_array['token']));
+
+	set_transient( $uniqueString, $authentication_array,  MINUTE_IN_SECONDS * 15 ); // Set all the data into transient in the database (The transient key is the identifier)
 	
 	$url = wp_login_url( get_home_url( ) );
-	$url .= "&token=$encoded_token"; // URL for send to the message
+	$url .= "&token=$uniqueString"; // URL for send to the message
 	
 	$to = $user->user_email;
 	$subject = 'Verify Your Email Address';
@@ -92,22 +104,35 @@ function send_verification_link($user, $password){
 add_action( "login_init", "checking_the_verification_link" );
 function checking_the_verification_link(){ // This function will check the verification link and give access to the site
 	if(isset($_GET['token'])){
-		$encoded_token = $_GET['token'];
-		$plain_token = base64_decode($encoded_token);
+		$_128bit = $_GET['token']; // It's md5() 128bit format string
 
-		$cache_credentials = get_transient( $plain_token ); // Get transient by plain token (Unique string)
+		$cache_credentials = get_transient( $_128bit ); // Get transient by token (128bit string)
 		
-		if($cache_credentials){
-			remove_action( "wp_authenticate_user", "checking_user_credentials_validity" ); // Remove the wp_authenticate_user
-			$user = wp_signon( $cache_credentials, true );
+		if(is_array($cache_credentials) && sizeof($cache_credentials) > 0){
+			
+			$informations = [];
+			if(array_key_exists('token', $cache_credentials)){ // point to the correct data
+				$informations = $cache_credentials['token'];
+			}
 
-			if ( !is_wp_error( $user ) ) {
-				delete_transient( $plain_token ); // If got access then delete the transient
-				wp_safe_redirect(home_url( '/' ));
-				exit;
-			}else{
-				delete_transient( $plain_token ); // delete the transient if exist
-				// echo $user->get_error_message();
+			if(sizeof($informations) > 0){
+				$transient_128bit = md5(json_encode($informations));
+
+				if($transient_128bit === $_128bit){ // Matching transient values with url string
+					remove_action( "wp_authenticate_user", "checking_user_credentials_validity" ); // Remove the wp_authenticate_user
+					$user = wp_signon( $cache_credentials['access'], true );
+					wp_set_current_user ( $user->ID ); // Set the current user detail
+        			wp_set_auth_cookie  ( $user->ID ); // Set auth details in cookie
+	
+					if ( !is_wp_error( $user ) ) {
+						delete_transient( $_128bit ); // If got access then delete the transient
+						wp_safe_redirect(home_url( '/' ));
+						exit;
+					}else{
+						delete_transient( $_128bit ); // delete the transient if exist
+						// echo $user->get_error_message();
+					}
+				}
 			}
 		}
 	}
